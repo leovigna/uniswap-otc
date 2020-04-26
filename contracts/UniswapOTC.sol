@@ -129,12 +129,16 @@ contract UniswapOTC {
      * @dev Withdraw OTC provider fee tokens.
      */
     function withdrawFeeTokens() public onlyOwner {
+        require(totalFees > 0, "No fees!");
+
         IERC20 token = IERC20(exchange.tokenAddress());
 
         //Substract fees
         uint256 feeTransfer = totalFees;
 
-        totalFees = 0;
+        totalFees = totalFees - feeTransfer; //Update set to 0
+        totalPurchased = totalPurchased - feeTransfer; //Update token balance
+
         token.transfer(msg.sender, feeTransfer);
     }
 
@@ -142,6 +146,8 @@ contract UniswapOTC {
      * @dev Withdraw OTC client purchased tokens.
      */
     function withdrawClientTokens() public onlyClient {
+        require(totalPurchased > 0, "No tokens!");
+
         IERC20 token = IERC20(exchange.tokenAddress());
 
         //Substract fees
