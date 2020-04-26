@@ -132,8 +132,10 @@ contract UniswapOTC {
         IERC20 token = IERC20(exchange.tokenAddress());
 
         //Substract fees
+        uint256 feeTransfer = totalFees;
+
         totalFees = 0;
-        token.transfer(msg.sender, totalFees);
+        token.transfer(msg.sender, feeTransfer);
     }
 
     /**
