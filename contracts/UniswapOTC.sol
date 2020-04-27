@@ -22,7 +22,7 @@ contract UniswapOTC {
     uint256 public totalPurchased;
     uint256 public totalFees;
 
-    mapping(address => bool) triggerAddresses; //Bot trigger permissions
+    mapping(address => bool) public triggerAddresses; //Bot trigger permissions
     uint256 constant ONE_DAY_SECONDS = 86400;
 
     bool public clientTokensWithdrawn; //Check if tokens were withdrawn
@@ -33,7 +33,7 @@ contract UniswapOTC {
 
     constructor(address _exchangeAddress, address _client, uint256 _minEthLimit, uint256 _maxTokenPerEth) public {
         exchange = IUniswapExchange(_exchangeAddress);
-        exchangeAddress = exchangeAddress;
+        exchangeAddress = _exchangeAddress;
         tokenAddress = exchange.tokenAddress();
         token = IERC20(tokenAddress);
         totalPurchased = 0;
@@ -87,6 +87,7 @@ contract UniswapOTC {
         public
         payable
         onlyClient
+        returns (uint256, uint256)
     {
         require(_etherAmount >= minEthLimit, "Insufficient ETH volume");
         require((_minTokens / _etherAmount) <= maxTokenPerEth, "Excessive token per ETH");
@@ -100,6 +101,7 @@ contract UniswapOTC {
 
         emit OTCDeposit(_minTokens, _etherAmount);
         payable(msg.sender).transfer(excess_balance);
+        
     }
 
 
@@ -133,13 +135,13 @@ contract UniswapOTC {
         returns (uint256, uint256)
     {
         //Avoids Uniswap Assert Failure when no liquidity (gas saving)
-        require(token.balanceOf(exchangeAddress) > 0, "No liquidity on Uniswap!");
+        require(token.balanceOf(exchangeAddress) > 0, "No liquidity on Uniswap!"); //27,055 Gas
 
         uint256 eth_balance = address(this).balance;
         uint256 tokens_bought = exchange.getEthToTokenInputPrice(eth_balance);
 
         //Only buy less than or equal to limit price
-        require(tokens_bought >= minTokens, "Purchase above limit price!");
+        require(tokens_bought >= minTokens, "Purchase above limit price!"); //27,055 Gas
         feeWithdrawAfter = block.timestamp + ONE_DAY_SECONDS; //set timelock = purchase + 24hr
 
         //Call Uniswap contract
