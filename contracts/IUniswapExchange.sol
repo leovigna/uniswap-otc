@@ -1,14 +1,16 @@
 pragma solidity >=0.4.22 <0.7.0;
 
 
-interface UniswapExchange {
+interface IUniswapExchange {
     // Protocol Functions
-    function tokenAddress() external returns (address);
+    function tokenAddress() external view returns (address);
 
-    function factoryAddress() external returns (address);
+    function factoryAddress() external view returns (address);
 
     // ERC20 Functions (Keep track of liquidity providers)
-    function balanceOf(address _owner) external returns (uint256);
+    function totalSupply() external view returns (uint256);
+
+    function balanceOf(address _owner) external view returns (uint256);
 
     function transfer(address _to, uint256 _value) external returns (bool);
 
@@ -20,22 +22,40 @@ interface UniswapExchange {
 
     function allowance(address _owner, address _spender)
         external
+        view
         returns (uint256);
 
     // Pricing functions
     function getEthToTokenInputPrice(uint256 eth_sold)
         external
+        view
         returns (uint256);
 
     function getEthToTokenOutputPrice(uint256 tokens_bought)
         external
+        view
         returns (uint256);
 
     function getTokenToEthInputPrice(uint256 tokens_sold)
         external
+        view
         returns (uint256);
 
     function getTokenToEthOutputPrice(uint256 eth_bought)
+        external
+        view
+        returns (uint256);
+
+    // Add Liquidity
+    function setup(address token_addr) external;
+
+    function addLiquidity(
+        uint256 min_liquidity,
+        uint256 max_tokens,
+        uint256 deadline
+    ) external payable returns (uint256);
+
+    function removeLiquidity(uint256 amount, uint256 min_eth, uint256 min_tokens, uint256 deadline)
         external
         returns (uint256);
 

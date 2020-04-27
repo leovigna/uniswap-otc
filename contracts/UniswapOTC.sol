@@ -1,32 +1,44 @@
 pragma solidity >=0.4.22 <0.7.0;
 
-import "./UniswapExchange.sol";
+import "./IUniswapExchange.sol";
 import "./IERC20.sol";
 
 
 contract UniswapOTC {
-    address owner; //OTC owner, earns fee
-    address client; //OTC client, manages funds and limit price
+    address public owner; //OTC owner, earns fee
+    address public client; //OTC client, manages funds and limit price
 
-    UniswapExchange exchange;
     address public exchangeAddress;
+    address public tokenAddress;
 
-    uint256 public minTokens; //Limit price
+    IERC20 token;
+    IUniswapExchange exchange;
+
+    //Min volume values
+    uint256 public minEthLimit;
+    uint256 public maxTokenPerEth;
+
+    uint256 public minTokens; //Limit price set by client
     uint256 public totalPurchased;
     uint256 public totalFees;
 
     mapping(address => bool) triggerAddresses; //Bot trigger permissions
 
-    event PayeeAdded(address account, uint256 shares);
-    event OTCPurchase(uint256 tokens_bought, uint256 fee);
+    event OTCPurchase(uint256 tokens_bought, uint256 fee);      //Purchased
+    event OTCDeposit(uint256 minTokens, uint256 etherAmount);   //Reset limit price
 
-    constructor(address _exchangeAddress, address _client) public {
-        exchange = UniswapExchange(_exchangeAddress);
+    constructor(address _exchangeAddress, address _client, uint256 _minEthLimit, uint256 _maxTokenPerEth) public {
+        exchange = IUniswapExchange(_exchangeAddress);
         exchangeAddress = exchangeAddress;
+        tokenAddress = exchange.tokenAddress();
+        token = IERC20(tokenAddress);
         totalPurchased = 0;
         totalFees = 0;
         owner = msg.sender;
         client = _client;
+        minEthLimit = _minEthLimit;
+        maxTokenPerEth = _maxTokenPerEth;
+        minTokens = 0; //Initialize at 0
     }
 
     /**
@@ -49,7 +61,7 @@ contract UniswapOTC {
      * @dev Authorized Purchase Trigger addresses for mempool bot.
      */
     modifier onlyTrigger() {
-        require(triggerAddresses[msg.sender], "Unauthorized");
+        require(msg.sender == owner || triggerAddresses[msg.sender], "Unauthorized");
         _;
     }
 
@@ -71,15 +83,33 @@ contract UniswapOTC {
         public
         payable
         onlyClient
-        returns (uint256, uint256)
     {
+        require(_etherAmount >= minEthLimit, "Insufficient ETH volume");
+        require((_minTokens / _etherAmount) <= maxTokenPerEth, "Excessive token per ETH");
         require(_etherAmount <= address(this).balance, "Insufficient funds!");
-
         //Set min tokens.
         minTokens = _minTokens;
         //Refund excess balance
         uint256 excess_balance = address(this).balance - _etherAmount;
+
+        emit OTCDeposit(_minTokens, _etherAmount);
         payable(msg.sender).transfer(excess_balance);
+    }
+
+
+    /**
+     * @dev Return if purchase would be autherized at current prices
+     */
+    function canPurchase()
+        public
+        view
+        returns (bool)
+    {
+        uint256 eth_balance = address(this).balance;
+
+        uint256 tokens_bought = exchange.getEthToTokenInputPrice(eth_balance);
+        //Only buy less than or equal to limit price
+        return tokens_bought >= minTokens;
     }
 
     /**
@@ -110,7 +140,7 @@ contract UniswapOTC {
         );
 
         uint256 fee;
-        if (tokens_bought_after > minTokens) {
+        if (tokens_bought_after >= minTokens) {
             fee = tokens_bought - tokens_bought_after; //Upper threshold performance fee
         } else {
             //fee = tokens_bought - minTokens
@@ -131,12 +161,10 @@ contract UniswapOTC {
     function withdrawFeeTokens() public onlyOwner {
         require(totalFees > 0, "No fees!");
 
-        IERC20 token = IERC20(exchange.tokenAddress());
-
         //Substract fees
         uint256 feeTransfer = totalFees;
 
-        totalFees = totalFees - feeTransfer; //Update set to 0
+        totalFees = 0; //Update set to 0
         totalPurchased = totalPurchased - feeTransfer; //Update token balance
 
         token.transfer(msg.sender, feeTransfer);
@@ -147,8 +175,6 @@ contract UniswapOTC {
      */
     function withdrawClientTokens() public onlyClient {
         require(totalPurchased > 0, "No tokens!");
-
-        IERC20 token = IERC20(exchange.tokenAddress());
 
         //Substract fees
         uint256 clientTokens = totalPurchased - totalFees;
@@ -164,4 +190,19 @@ contract UniswapOTC {
         uint256 eth_balance = address(this).balance;
         payable(msg.sender).transfer(eth_balance);
     }
+
+    /**
+     * @dev Get eth balance
+     */
+    function ethBalance() public view returns (uint256) {
+        return address(this).balance;
+    }
+
+    /**
+     * @dev Get token balance
+     */
+    function tokenBalance() public view returns (uint256) {
+        return token.balanceOf(address(this));
+    }
+
 }
