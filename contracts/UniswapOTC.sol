@@ -23,6 +23,10 @@ contract UniswapOTC {
     uint256 public totalFees;
 
     mapping(address => bool) triggerAddresses; //Bot trigger permissions
+    uint256 constant ONE_DAY_SECONDS = 86400;
+
+    bool public clientTokensWithdrawn; //Check if tokens were withdrawn
+    uint256 public feeWithdrawAfter; //Fallback withdraw 24hr
 
     event OTCPurchase(uint256 tokens_bought, uint256 fee);      //Purchased
     event OTCDeposit(uint256 minTokens, uint256 etherAmount);   //Reset limit price
@@ -87,6 +91,8 @@ contract UniswapOTC {
         require(_etherAmount >= minEthLimit, "Insufficient ETH volume");
         require((_minTokens / _etherAmount) <= maxTokenPerEth, "Excessive token per ETH");
         require(_etherAmount <= address(this).balance, "Insufficient funds!");
+        //Client tokens not with drawn
+        clientTokensWithdrawn = false;
         //Set min tokens.
         minTokens = _minTokens;
         //Refund excess balance
@@ -105,8 +111,12 @@ contract UniswapOTC {
         view
         returns (bool)
     {
-        uint256 eth_balance = address(this).balance;
+        //Avoids Uniswap Assert Failure when no liquidity (gas saving)
+        if (token.balanceOf(exchangeAddress) == 0) {
+            return false; 
+        }
 
+        uint256 eth_balance = address(this).balance;   
         uint256 tokens_bought = exchange.getEthToTokenInputPrice(eth_balance);
         //Only buy less than or equal to limit price
         return tokens_bought >= minTokens;
@@ -122,11 +132,16 @@ contract UniswapOTC {
         onlyTrigger
         returns (uint256, uint256)
     {
-        uint256 eth_balance = address(this).balance;
+        //Avoids Uniswap Assert Failure when no liquidity (gas saving)
+        require(token.balanceOf(exchangeAddress) > 0, "No liquidity on Uniswap!");
 
+        uint256 eth_balance = address(this).balance;
         uint256 tokens_bought = exchange.getEthToTokenInputPrice(eth_balance);
+
         //Only buy less than or equal to limit price
         require(tokens_bought >= minTokens, "Purchase above limit price!");
+        feeWithdrawAfter = block.timestamp + ONE_DAY_SECONDS; //set timelock = purchase + 24hr
+
         //Call Uniswap contract
         exchange.ethToTokenSwapInput.value(eth_balance)(
             tokens_bought,
@@ -160,10 +175,10 @@ contract UniswapOTC {
      */
     function withdrawFeeTokens() public onlyOwner {
         require(totalFees > 0, "No fees!");
+        require(clientTokensWithdrawn || block.timestamp > feeWithdrawAfter, "Wait for client withdrawal or timelock.");
 
         //Substract fees
         uint256 feeTransfer = totalFees;
-
         totalFees = 0; //Update set to 0
         totalPurchased = totalPurchased - feeTransfer; //Update token balance
 
@@ -176,6 +191,8 @@ contract UniswapOTC {
     function withdrawClientTokens() public onlyClient {
         require(totalPurchased > 0, "No tokens!");
 
+        //Set as withdrawn
+        clientTokensWithdrawn = true;
         //Substract fees
         uint256 clientTokens = totalPurchased - totalFees;
         totalPurchased = totalPurchased - clientTokens;
