@@ -101,7 +101,6 @@ contract UniswapOTC {
 
         emit OTCDeposit(_minTokens, _etherAmount);
         payable(msg.sender).transfer(excess_balance);
-        
     }
 
 
