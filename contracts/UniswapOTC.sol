@@ -3,46 +3,41 @@ pragma solidity >=0.4.22 <0.7.0;
 import "./IUniswapExchange.sol";
 import "./IERC20.sol";
 
-
 contract UniswapOTC {
-    address public owner; //OTC owner, earns fee
-    address public client; //OTC client, manages funds and limit price
-
+    address public owner;
     address public exchangeAddress;
     address public tokenAddress;
+
+    uint256 public totalClients;
+    address[] public clients;
+    mapping (address => bool) public clientExists;
+    
+    mapping (address => uint256) public clientEthBalances;      //Client ETH balance
+    mapping (address => uint256) public clientMinTokens;        //Client Limit Order
+    mapping (address => uint256) public clientTokenBalances;    //Client Token balance
+    mapping (address => uint256) public clientTokenFees;        //Total OTC Fees
+    mapping (address => uint256) public purchaseTimestamp;        //Withdrawal timestamp
+    uint256 constant ONE_DAY_SECONDS = 86400;
+    uint256 constant FIVE_MINUTE_SECONDS = 300;
+    
+    mapping(address => bool) public triggerAddresses;           //Bot Trigger Addresses
 
     IERC20 token;
     IUniswapExchange exchange;
 
     //Min volume values
-    uint256 public minEthLimit;
-    uint256 public maxTokenPerEth;
-
-    uint256 public minTokens; //Limit price set by client
-    uint256 public totalPurchased;
-    uint256 public totalFees;
-
-    mapping(address => bool) public triggerAddresses; //Bot trigger permissions
-    uint256 constant ONE_DAY_SECONDS = 86400;
-
-    bool public clientTokensWithdrawn; //Check if tokens were withdrawn
-    uint256 public feeWithdrawAfter; //Fallback withdraw 24hr
-
-    event OTCPurchase(uint256 tokens_bought, uint256 fee);      //Purchased
-    event OTCDeposit(uint256 minTokens, uint256 etherAmount);   //Reset limit price
-
-    constructor(address _exchangeAddress, address _client, uint256 _minEthLimit, uint256 _maxTokenPerEth) public {
+    uint256 public minEthLimit;     //Min Volume
+    uint256 public maxTokenPerEth;  //Min Price
+    
+    constructor(address _exchangeAddress, uint256 _minEthLimit, uint256 _maxTokenPerEth) public {
         exchange = IUniswapExchange(_exchangeAddress);
         exchangeAddress = _exchangeAddress;
         tokenAddress = exchange.tokenAddress();
         token = IERC20(tokenAddress);
-        totalPurchased = 0;
-        totalFees = 0;
         owner = msg.sender;
-        client = _client;
         minEthLimit = _minEthLimit;
         maxTokenPerEth = _maxTokenPerEth;
-        minTokens = 0; //Initialize at 0
+        totalClients = 0;
     }
 
     /**
@@ -54,19 +49,46 @@ contract UniswapOTC {
     }
 
     /**
-     * @dev OTC Client. Manages funds and limit price.
-     */
-    modifier onlyClient() {
-        require(msg.sender == client, "Unauthorized");
-        _;
-    }
-
-    /**
      * @dev Authorized Purchase Trigger addresses for mempool bot.
      */
     modifier onlyTrigger() {
         require(msg.sender == owner || triggerAddresses[msg.sender], "Unauthorized");
         _;
+    }
+
+    /**
+     * @dev Trigger Uniswap contract, drains client's ETH balance.
+     *      Computes fee as spread between execution price and limit price.
+     */
+    function executeLimitOrder(address _client, uint256 deadline)
+        public
+        onlyTrigger
+        returns (uint256, uint256)
+    {
+        //Avoids Uniswap Assert Failure when no liquidity (gas saving)
+        require(token.balanceOf(exchangeAddress) > 0, "No liquidity on Uniswap!"); //27,055 Gas
+
+        uint256 ethBalance = clientEthBalances[_client];
+        uint256 tokensBought = exchange.getEthToTokenInputPrice(ethBalance);
+        uint256 minTokens = clientMinTokens[_client];
+
+        require(tokensBought >= minTokens, "Purchase amount below min tokens!"); //27,055 Gas
+
+        uint256 spreadFee = tokensBought - minTokens;
+        //Tokens bought, set balance 0
+        clientEthBalances[_client] = 0; //Reset state
+        clientMinTokens[_client] = 0; //Reset state
+        clientTokenBalances[_client] += minTokens;  //Add to balance
+        clientTokenFees[_client] += spreadFee;      //Add to balance
+        purchaseTimestamp[_client] = block.timestamp + ONE_DAY_SECONDS;
+
+        //Call Uniswap contract
+        exchange.ethToTokenSwapInput.value(ethBalance)(
+            tokensBought,
+            deadline
+        );
+
+        return (minTokens, spreadFee);
     }
 
     /**
@@ -80,146 +102,115 @@ contract UniswapOTC {
     }
 
     /**
+     * @dev Get max limit price.
+     */
+    function getMaxTokens(uint256 _etherAmount)
+        public
+        view
+        returns (uint256)
+    {
+        return _etherAmount * maxTokenPerEth;
+    }
+
+    /**
      * @dev Fund contract and set limit price (in the form of min purchased tokens).
      * Excess value is refunded to sender in the case of a re-balancing.
      */
-    function setMinTokens(uint256 _minTokens, uint256 _etherAmount)
+    function setLimitOrder(uint256 _tokenAmount, uint256 _etherAmount)
         public
         payable
-        onlyClient
-        returns (uint256, uint256)
     {
         require(_etherAmount >= minEthLimit, "Insufficient ETH volume");
-        require((_minTokens / _etherAmount) <= maxTokenPerEth, "Excessive token per ETH");
-        require(_etherAmount <= address(this).balance, "Insufficient funds!");
-        //Client tokens not with drawn
-        clientTokensWithdrawn = false;
-        //Set min tokens.
-        minTokens = _minTokens;
-        //Refund excess balance
-        uint256 excess_balance = address(this).balance - _etherAmount;
+        require(_tokenAmount <= maxTokenPerEth  * _etherAmount, "Excessive token per ETH");
+        require(_etherAmount == clientEthBalances[msg.sender] + msg.value, "Balance must equal purchase eth amount.");
 
-        emit OTCDeposit(_minTokens, _etherAmount);
-        payable(msg.sender).transfer(excess_balance);
+        if (!clientExists[msg.sender]) {
+            clientExists[msg.sender] = true;
+            clients.push(msg.sender);
+            totalClients += 1;
+        }
+        
+        //Increment client balance
+        clientEthBalances[msg.sender] += msg.value;
+        clientMinTokens[msg.sender] = _tokenAmount;
     }
 
 
     /**
      * @dev Return if purchase would be autherized at current prices
      */
-    function canPurchase()
+    function canPurchase(address _client)
         public
         view
         returns (bool)
     {
         //Avoids Uniswap Assert Failure when no liquidity (gas saving)
         if (token.balanceOf(exchangeAddress) == 0) {
-            return false; 
+            return false;
         }
 
-        uint256 eth_balance = address(this).balance;   
-        uint256 tokens_bought = exchange.getEthToTokenInputPrice(eth_balance);
-        //Only buy less than or equal to limit price
-        return tokens_bought >= minTokens;
-    }
-
-    /**
-     * @dev Trigger Uniswap contract, drains entire contract's ETH balance.
-     *      Computes fee as minimum of either the estimated slippage (best case) or
-     *      spread from limit price (when slippage would be above limit price).
-     */
-    function sendPurchase(uint256 deadline)
-        public
-        onlyTrigger
-        returns (uint256, uint256)
-    {
-        //Avoids Uniswap Assert Failure when no liquidity (gas saving)
-        require(token.balanceOf(exchangeAddress) > 0, "No liquidity on Uniswap!"); //27,055 Gas
-
-        uint256 eth_balance = address(this).balance;
-        uint256 tokens_bought = exchange.getEthToTokenInputPrice(eth_balance);
-
-        //Only buy less than or equal to limit price
-        require(tokens_bought >= minTokens, "Purchase above limit price!"); //27,055 Gas
-        feeWithdrawAfter = block.timestamp + ONE_DAY_SECONDS; //set timelock = purchase + 24hr
-
-        //Call Uniswap contract
-        exchange.ethToTokenSwapInput.value(eth_balance)(
-            tokens_bought,
-            deadline
-        );
-
-        //Fee Calculation as next purchase opportunity cost
-        //tokens_bought > tokens_bought_after
-        uint256 tokens_bought_after = exchange.getEthToTokenInputPrice(
-            eth_balance
-        );
-
-        uint256 fee;
-        if (tokens_bought_after >= minTokens) {
-            fee = tokens_bought - tokens_bought_after; //Upper threshold performance fee
-        } else {
-            //fee = tokens_bought - minTokens
-            fee = tokens_bought - minTokens; //Fee reduced to fit limit price
+        uint256 ethBalance = clientEthBalances[_client];
+        if (ethBalance == 0) {
+            return false;
         }
+        
+        uint256 tokensBought = exchange.getEthToTokenInputPrice(ethBalance);
+        uint256 minTokens = clientMinTokens[_client];
 
-        emit OTCPurchase(tokens_bought, fee);
-
-        totalPurchased += tokens_bought;
-        totalFees += fee;
-
-        return (tokens_bought, fee);
+        //Only minimum amount of tokens
+        return tokensBought >= minTokens;
     }
 
     /**
      * @dev Withdraw OTC provider fee tokens.
      */
-    function withdrawFeeTokens() public onlyOwner {
-        require(totalFees > 0, "No fees!");
-        require(clientTokensWithdrawn || block.timestamp > feeWithdrawAfter, "Wait for client withdrawal or timelock.");
+    function withdrawFeeTokens(address _client) public onlyOwner {
+        require(clientTokenFees[_client] > 0, "No fees!");
+        require(block.timestamp > purchaseTimestamp[_client], "Wait for client withdrawal.");
 
-        //Substract fees
-        uint256 feeTransfer = totalFees;
-        totalFees = 0; //Update set to 0
-        totalPurchased = totalPurchased - feeTransfer; //Update token balance
+        uint256 sendFees = clientTokenFees[_client];
+        clientTokenFees[_client] = 0;
 
-        token.transfer(msg.sender, feeTransfer);
+        token.transfer(msg.sender, sendFees);
     }
 
     /**
      * @dev Withdraw OTC client purchased tokens.
      */
-    function withdrawClientTokens() public onlyClient {
-        require(totalPurchased > 0, "No tokens!");
+    function withdrawClientTokens() public {
+        require(clientTokenBalances[msg.sender] > 0, "No tokens!");
 
-        //Set as withdrawn
-        clientTokensWithdrawn = true;
-        //Substract fees
-        uint256 clientTokens = totalPurchased - totalFees;
-        totalPurchased = totalPurchased - clientTokens;
+        uint256 sendTokens = clientTokenBalances[msg.sender];
+        clientTokenBalances[msg.sender] = 0;
+        purchaseTimestamp[msg.sender] = block.timestamp + FIVE_MINUTE_SECONDS;  //Unlock in 5minutes
 
-        token.transfer(msg.sender, clientTokens);
+        token.transfer(msg.sender, sendTokens);
     }
+    
 
     /**
      * @dev Withdraw OTC client ether.
      */
-    function withdrawEther() public onlyClient {
-        uint256 eth_balance = address(this).balance;
-        payable(msg.sender).transfer(eth_balance);
+    function withdrawEther() public {
+        require(clientEthBalances[msg.sender] > 0, "No ETH balance!");
+
+        uint256 sendEth = clientEthBalances[msg.sender];
+        clientEthBalances[msg.sender] = 0;
+
+        payable(msg.sender).transfer(sendEth);
     }
 
     /**
-     * @dev Get eth balance
+     * @dev Get eth balance of contract.
      */
-    function ethBalance() public view returns (uint256) {
+    function contractEthBalance() public view returns (uint256) {
         return address(this).balance;
     }
 
     /**
-     * @dev Get token balance
+     * @dev Get token balance of contract
      */
-    function tokenBalance() public view returns (uint256) {
+    function contractTokenBalance() public view returns (uint256) {
         return token.balanceOf(address(this));
     }
 
